@@ -1,0 +1,6 @@
+# requirements-sync.txt - Minimal für Sync-Only Lösung
+notion-client==2.2.1
+python-frontmatter==1.0.0
+python-dotenv==1.0.0
+markdownify==0.11.6
+requests==2.31.0

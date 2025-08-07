@@ -1,0 +1,22 @@
+# docker-compose-sync.yml - Nur Sync, kein MCP-Server
+version: '3.8'
+
+services:
+  notion-obsidian-sync:
+    build: .
+    container_name: notion-obsidian-sync
+    env_file:
+      - .env
+    volumes:
+      # Dein Obsidian Vault Pfad
+      - /Users/florianburghardt/Main-Obsidian-Vault:/shared/obsidian
+      - ./logs:/var/log
+    environment:
+      # Überschreibe falls nötig (aus .env-Datei geladen)
+      - OBSIDIAN_PATH=/shared/obsidian
+      - SYNC_INTERVAL_MINUTES=15
+    restart: unless-stopped
+
+# Volumes für Logs
+volumes:
+  logs:

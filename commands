@@ -1,0 +1,9 @@
+# Live-Logs verfolgen
+docker-compose -f docker-compose-sync.yml logs -f
+
+# Sync-Status prüfen  
+docker exec notion-obsidian-sync python3 master_sync.py status
+
+# Container stoppen/starten
+docker-compose -f docker-compose-sync.yml down
+docker-compose -f docker-compose-sync.yml up -d
