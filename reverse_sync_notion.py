@@ -425,6 +425,103 @@ class ObsidianToNotion:
             print(f"❌ Fehler bei Page-Suche: {e}")
             return None, None
     
+    def classify_update_type(self, filepath: str, metadata: dict) -> str:
+        """Klassifiziert ob es sich um eine neue Page oder Update handelt"""
+        notion_id = metadata.get('notion_id')
+        
+        # 1. Hat notion_id und sync_direction ist from_notion = UPDATE einer bestehenden Page
+        if notion_id and metadata.get('sync_direction') == 'from_notion':
+            return 'existing_page_update'
+        
+        # 2. Keine notion_id oder sync_direction ist to_notion = NEUE Page aus Obsidian
+        if not notion_id or metadata.get('sync_direction') == 'to_notion':
+            return 'new_page_creation'
+        
+        # 3. Fallback: Prüfe ob die Page in Notion noch existiert
+        if notion_id:
+            try:
+                self.notion.pages.retrieve(page_id=notion_id)
+                return 'existing_page_update'
+            except:
+                # Notion Page existiert nicht mehr → Als neue Page behandeln
+                return 'new_page_creation'
+        
+        # 4. Standard: Als neue Page behandeln
+        return 'new_page_creation'
+    
+    def detect_parent_from_path(self, filepath: str) -> tuple:
+        """Erkennt Parent-Page aus Obsidian-Ordnerstruktur"""
+        try:
+            path = Path(filepath)
+            
+            # Entferne 'from-notion' prefix
+            parts = path.parts
+            if 'from-notion' in parts:
+                notion_index = parts.index('from-notion')
+                relevant_parts = parts[notion_index + 1:]
+            else:
+                relevant_parts = parts
+            
+            # Wenn nur Dateiname → Root-Level
+            if len(relevant_parts) <= 1:
+                return None, None
+            
+            # Parent-Ordner ermitteln
+            parent_folder = relevant_parts[-2]  # Letzter Ordner vor der Datei
+            
+            # Suche nach _ParentName.md im Parent-Ordner
+            parent_path = Path(filepath).parent
+            expected_parent_file = parent_path / f"_{parent_folder}.md"
+            
+            if expected_parent_file.exists():
+                try:
+                    with open(expected_parent_file, 'r', encoding='utf-8') as f:
+                        parent_post = frontmatter.load(f)
+                    
+                    parent_notion_id = parent_post.metadata.get('notion_id')
+                    if parent_notion_id:
+                        print(f"🎯 Parent gefunden: {parent_folder} ({parent_notion_id[:8]}...)")
+                        return parent_notion_id, parent_folder
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Lesen der Parent-Datei {expected_parent_file}: {e}")
+            
+            print(f"📁 Kein Parent erkannt für {filepath}")
+            return None, None
+            
+        except Exception as e:
+            print(f"❌ Fehler bei Parent-Detection: {e}")
+            return None, None
+    
+    def create_notion_child_page(self, title: str, content: str, parent_id: str, filepath: str) -> str:
+        """Erstellt echte Notion-Unterseite (nicht Database-Entry)"""
+        try:
+            print(f"🎯 Erstelle echte Notion-Unterseite: {title}")
+            print(f"   └─ Parent: {parent_id[:8]}...")
+            
+            # Blocks aus Markdown generieren
+            blocks = self.markdown_to_notion_blocks(content)
+            
+            # Properties für die neue Page
+            properties = {
+                "title": [{"type": "text", "text": {"content": title}}]
+            }
+            
+            # Page als echte Unterseite erstellen
+            new_page = self.notion.pages.create(
+                parent={"page_id": parent_id},
+                properties={"title": {"title": properties["title"]}},
+                children=blocks
+            )
+            
+            new_page_id = new_page['id']
+            print(f"✅ Echte Unterseite erstellt: {title} ({new_page_id[:8]}...)")
+            
+            return new_page_id
+            
+        except Exception as e:
+            print(f"❌ Fehler beim Erstellen der Unterseite: {e}")
+            raise
+    
     def sync_pending_files(self):
         """Alle pending Obsidian-Dateien zu Notion syncen"""
         print("🚀 Starte Obsidian → Notion Sync...")
@@ -470,33 +567,69 @@ class ObsidianToNotion:
                 
                 print(f"🔄 Synce: {filepath}")
                 
-                # Prüfe ob Page bereits existiert (mit Notion-ID aus Frontmatter)
-                notion_id = metadata.get('notion_id')
-                existing_page_id, page_type = self.find_existing_page(filepath, notion_id)
+                # INTELLIGENTE KLASSIFIZIERUNG: Neue vs. bestehende Page
+                update_type = self.classify_update_type(filepath, metadata)
+                print(f"🧠 Klassifizierung: {update_type}")
                 
-                if existing_page_id:
-                    # Update bestehende Page
-                    if page_type == 'original_page':
-                        # 🚨 SICHERHEITSMODUS: Keine direkten Updates der ursprünglichen Pages!
-                        print(f"🚨 SICHERHEIT: Überspringe direktes Update der ursprünglichen Page: {title}")
-                        print(f"💡 Tipp: Bearbeite die Page direkt in Notion oder erstelle eine neue Database Entry")
-                        # Markiere trotzdem als synced, damit keine endlose Wiederholung
+                if update_type == 'existing_page_update':
+                    # BESTEHENDE PAGE UPDATE (SICHERHEITSMODUS)
+                    notion_id = metadata.get('notion_id')
+                    existing_page_id, page_type = self.find_existing_page(filepath, notion_id)
+                    
+                    if existing_page_id and page_type == 'original_page':
+                        # 🚨 SICHERHEITSMODUS: Bestehende ursprüngliche Pages nicht ändern!
+                        print(f"🚨 SICHERHEIT: Überspringe Update der ursprünglichen Page: {title}")
+                        print(f"💡 Hinweis: Bearbeite die Page direkt in Notion")
                         self.mark_file_synced(file_info['full_path'], post)
                         continue
-                    else:
+                    elif existing_page_id and page_type == 'database_entry':
                         # Update Database Entry (SICHER)
                         self.update_notion_page(existing_page_id, title, content, metadata)
                         print(f"✅ Database Entry Updated (SICHER): {title}")
-                else:
-                    # Neue Page erstellen - aber nur wenn Database verfügbar
-                    if self.database_available:
-                        new_page_id = self.create_notion_page(title, content, metadata, filepath)
-                        print(f"✅ New Database Entry Created (SICHER): {title}")
                     else:
-                        print(f"⚠️ Überspringe {title} - keine Database verfügbar")
-                        # Markiere als synced um endlose Wiederholung zu vermeiden
+                        print(f"⚠️ Existierende Page nicht gefunden für {title}")
                         self.mark_file_synced(file_info['full_path'], post)
-                        continue  # Skip diese Datei
+                        continue
+                        
+                elif update_type == 'new_page_creation':
+                    # NEUE PAGE ERSTELLEN
+                    print(f"🆕 Erstelle neue Page: {title}")
+                    
+                    # Parent-Detection aus Ordnerstruktur
+                    parent_id, parent_name = self.detect_parent_from_path(filepath)
+                    
+                    if parent_id:
+                        # Erstelle echte Notion-Unterseite
+                        try:
+                            new_page_id = self.create_notion_child_page(title, content, parent_id, filepath)
+                            
+                            # Update Obsidian-Datei mit neuer notion_id
+                            metadata['notion_id'] = new_page_id
+                            metadata['sync_direction'] = 'from_notion'  # Jetzt eine "echte" Notion-Page
+                            metadata['parent_id'] = parent_id
+                            metadata['created_in_obsidian'] = True
+                            
+                            print(f"✅ Echte Notion-Unterseite erstellt: {title}")
+                            
+                        except Exception as e:
+                            print(f"❌ Fallback: Erstelle Database Entry für {title}")
+                            if self.database_available:
+                                new_page_id = self.create_notion_page(title, content, metadata, filepath)
+                                print(f"✅ Database Entry Created (Fallback): {title}")
+                            else:
+                                print(f"⚠️ Überspringe {title} - weder Parent noch Database verfügbar")
+                                self.mark_file_synced(file_info['full_path'], post)
+                                continue
+                    else:
+                        # Kein Parent gefunden → Database Entry (wie bisher)
+                        print(f"📁 Kein Parent gefunden → Database Entry für {title}")
+                        if self.database_available:
+                            new_page_id = self.create_notion_page(title, content, metadata, filepath)
+                            print(f"✅ Database Entry Created: {title}")
+                        else:
+                            print(f"⚠️ Überspringe {title} - keine Database verfügbar")
+                            self.mark_file_synced(file_info['full_path'], post)
+                            continue
                 
                 # Obsidian-Datei als gesynct markieren
                 self.mark_file_synced(file_info['full_path'], post)
@@ -514,6 +647,7 @@ class ObsidianToNotion:
         post.metadata['sync_status'] = 'synced'
         post.metadata['synced_to_notion_at'] = datetime.now().isoformat()
         
+        # Speichere aktualisierte Metadaten (z.B. neue notion_id)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(frontmatter.dumps(post))
 
