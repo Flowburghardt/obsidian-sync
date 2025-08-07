@@ -21,13 +21,25 @@ class ObsidianToNotion:
         
         self.notion = Client(auth=self.notion_token)
         
-        # Wenn keine Database ID gesetzt, versuche automatisch zu erstellen
+        # Database-Setup ist optional - Fallback auf direkte Page-Updates
+        self.database_available = False
         if not self.notion_database_id:
-            self.notion_database_id = self.create_or_find_database()
+            try:
+                self.notion_database_id = self.create_or_find_database()
+                self.database_available = True
+            except Exception as e:
+                print(f"⚠️ Database-Setup fehlgeschlagen: {e}")
+                print("🔄 Verwende direktes Page-Update ohne Database")
+                self.database_available = False
+        else:
+            # Prüfe ob Database existiert
+            self.database_available = self.verify_database_access()
     
     def create_or_find_database(self):
         """Notion Database für Obsidian-Sync erstellen oder finden"""
         try:
+            print("🔍 Suche nach existierender 'Obsidian Sync' Database...")
+            
             # Suche nach existierender Database
             search_result = self.notion.search(
                 query="Obsidian Sync",
@@ -36,11 +48,11 @@ class ObsidianToNotion:
             
             if search_result['results']:
                 db_id = search_result['results'][0]['id']
-                print(f"✅ Existierende Database gefunden: {db_id}")
+                print(f"✅ Existierende Database gefunden: {db_id[:8]}...")
                 return db_id
             
-            # Erstelle neue Database
-            print("🔄 Erstelle neue Notion Database...")
+            print("📄 Keine 'Obsidian Sync' Database gefunden")
+            print("🔄 Versuche neue Database zu erstellen...")
             
             # Root page finden (Parent für neue Database)
             pages = self.notion.search(
@@ -48,9 +60,23 @@ class ObsidianToNotion:
             )
             
             if not pages['results']:
-                raise Exception("Keine Notion Pages gefunden. Erstelle zuerst eine Page in Notion.")
+                raise Exception("❌ Keine Notion Pages gefunden für Database-Parent. Erstelle zuerst eine Page in Notion.")
             
             parent_page_id = pages['results'][0]['id']
+            parent_page_title = "Unbekannte Page"
+            
+            # Versuche Parent-Page Titel zu extrahieren
+            try:
+                parent_page = self.notion.pages.retrieve(parent_page_id)
+                parent_props = parent_page.get('properties', {})
+                for prop_name, prop_data in parent_props.items():
+                    if prop_data.get('type') == 'title':
+                        parent_page_title = prop_data.get('title', [{}])[0].get('plain_text', 'Unbekannt')
+                        break
+            except:
+                pass
+            
+            print(f"🎯 Parent Page für Database: {parent_page_title}")
             
             # Database Schema
             database_properties = {
@@ -98,6 +124,24 @@ class ObsidianToNotion:
         except Exception as e:
             print(f"❌ Fehler beim Database-Setup: {e}")
             raise
+    
+    def verify_database_access(self) -> bool:
+        """Prüft ob Database zugänglich ist"""
+        try:
+            if not self.notion_database_id:
+                return False
+                
+            # Teste Database-Zugriff
+            self.notion.databases.query(
+                database_id=self.notion_database_id,
+                page_size=1
+            )
+            print(f"✅ Database verfügbar: {self.notion_database_id[:8]}...")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Database nicht verfügbar: {e}")
+            return False
     
     def markdown_to_notion_blocks(self, content: str) -> list:
         """Markdown Content zu Notion Blocks konvertieren"""
@@ -237,6 +281,9 @@ class ObsidianToNotion:
     def create_notion_page(self, title: str, content: str, metadata: dict, filepath: str):
         """Neue Notion Page erstellen"""
         try:
+            if not self.database_available:
+                raise Exception("Database nicht verfügbar")
+                
             # Blocks aus Markdown generieren
             blocks = self.markdown_to_notion_blocks(content)
             
@@ -276,6 +323,8 @@ class ObsidianToNotion:
         
         except Exception as e:
             print(f"❌ Fehler beim Erstellen der Notion Page: {e}")
+            # Database als nicht verfügbar markieren
+            self.database_available = False
             raise
     
     def update_notion_page(self, page_id: str, title: str, content: str, metadata: dict):
@@ -321,75 +370,17 @@ class ObsidianToNotion:
             raise
     
     def update_original_notion_page(self, page_id: str, title: str, content: str, metadata: dict):
-        """Direkte Aktualisierung der ursprünglichen Notion Page"""
+        """🚨 DEAKTIVIERT: Direkte Updates zu gefährlich - Fallback zu Database Entry"""
+        print(f"🚨 SICHERHEITSMODUS: Ursprüngliche Pages werden NICHT modifiziert!")
+        print(f"🔄 Fallback: Erstelle sicheren Database Entry statt direktem Update...")
+        
+        # SICHERHEITS-FALLBACK: Erstelle Database Entry statt destruktivem Update
         try:
-            print(f"🎯 Aktualisiere ursprüngliche Notion Page: {page_id[:8]}...")
-            
-            # 1. Prüfe ob Page einen Titel-Property hat und aktualisiere ihn
-            try:
-                page_info = self.notion.pages.retrieve(page_id=page_id)
-                properties = page_info.get('properties', {})
-                
-                # Suche nach Title-Property
-                title_property = None
-                for prop_name, prop_data in properties.items():
-                    if prop_data.get('type') == 'title':
-                        title_property = prop_name
-                        break
-                
-                # Aktualisiere Titel falls Property existiert
-                if title_property:
-                    self.notion.pages.update(
-                        page_id=page_id,
-                        properties={
-                            title_property: {
-                                "title": [{"type": "text", "text": {"content": title}}]
-                            }
-                        }
-                    )
-                    print(f"✅ Titel aktualisiert: {title}")
-            
-            except Exception as e:
-                print(f"⚠️ Titel-Update fehlgeschlagen (nicht kritisch): {e}")
-            
-            # 2. Content aktualisieren (alle Blocks ersetzen)
-            # Existierende Blocks holen
-            existing_blocks = self.notion.blocks.children.list(block_id=page_id)
-            
-            # Alle bestehenden Blocks löschen
-            for block in existing_blocks['results']:
-                try:
-                    self.notion.blocks.delete(block_id=block['id'])
-                except Exception as e:
-                    print(f"⚠️ Fehler beim Löschen von Block {block['id']}: {e}")
-            
-            # Neue Blocks aus Markdown generieren und hinzufügen
-            new_blocks = self.markdown_to_notion_blocks(content)
-            
-            if new_blocks:
-                # Blocks in kleineren Batches hinzufügen (Notion API Limit)
-                batch_size = 100
-                for i in range(0, len(new_blocks), batch_size):
-                    batch = new_blocks[i:i + batch_size]
-                    self.notion.blocks.children.append(
-                        block_id=page_id,
-                        children=batch
-                    )
-                
-                print(f"✅ Content aktualisiert: {len(new_blocks)} Blocks")
-            
-            # 3. Metadaten in Obsidian aktualisieren
-            # Hier könnten wir zusätzliche Sync-Metadaten hinzufügen
-            # Das passiert bereits in mark_file_synced()
-            
-            return page_id
-            
+            return self.create_notion_page(title, content, metadata, f"safe_fallback_{page_id[:8]}")
         except Exception as e:
-            print(f"❌ Fehler beim Aktualisieren der ursprünglichen Notion Page: {e}")
-            # Fallback: Erstelle Database Entry statt zu versagen
-            print("🔄 Fallback: Erstelle Database Entry...")
-            return self.create_notion_page(title, content, metadata, f"fallback_{page_id[:8]}")
-            raise
+            print(f"❌ Auch Fallback fehlgeschlagen: {e}")
+            print(f"⚠️ Überspringe {title} - zu gefährlich für Update")
+            raise Exception(f"SICHERHEITSMODUS: Kein Update möglich für {title}")
     
     def find_existing_page(self, filepath: str, notion_id: str = None):
         """Existierende Notion Page für Obsidian-Datei finden"""
@@ -405,21 +396,27 @@ class ObsidianToNotion:
                 except Exception as e:
                     print(f"⚠️ Ursprüngliche Notion Page nicht mehr verfügbar: {e}")
             
-            # 2. Fallback: Suche in Sync-Database nach Obsidian Path
-            query_result = self.notion.databases.query(
-                database_id=self.notion_database_id,
-                filter={
-                    "property": "Obsidian Path",
-                    "rich_text": {
-                        "equals": filepath
-                    }
-                }
-            )
-            
-            if query_result['results']:
-                database_page_id = query_result['results'][0]['id']
-                print(f"📊 Database Entry gefunden: {database_page_id[:8]}...")
-                return database_page_id, 'database_entry'
+            # 2. Fallback: Suche in Sync-Database nach Obsidian Path (nur wenn Database verfügbar)
+            if self.database_available:
+                try:
+                    query_result = self.notion.databases.query(
+                        database_id=self.notion_database_id,
+                        filter={
+                            "property": "Obsidian Path",
+                            "rich_text": {
+                                "equals": filepath
+                            }
+                        }
+                    )
+                    
+                    if query_result['results']:
+                        database_page_id = query_result['results'][0]['id']
+                        print(f"📊 Database Entry gefunden: {database_page_id[:8]}...")
+                        return database_page_id, 'database_entry'
+                        
+                except Exception as e:
+                    print(f"⚠️ Database-Suche fehlgeschlagen: {e}")
+                    self.database_available = False
             
             # 3. Keine existierende Page gefunden
             return None, None
@@ -480,17 +477,26 @@ class ObsidianToNotion:
                 if existing_page_id:
                     # Update bestehende Page
                     if page_type == 'original_page':
-                        # Direktes Update der ursprünglichen Notion Page
-                        self.update_original_notion_page(existing_page_id, title, content, metadata)
-                        print(f"✅ Original Page Updated: {title}")
+                        # 🚨 SICHERHEITSMODUS: Keine direkten Updates der ursprünglichen Pages!
+                        print(f"🚨 SICHERHEIT: Überspringe direktes Update der ursprünglichen Page: {title}")
+                        print(f"💡 Tipp: Bearbeite die Page direkt in Notion oder erstelle eine neue Database Entry")
+                        # Markiere trotzdem als synced, damit keine endlose Wiederholung
+                        self.mark_file_synced(file_info['full_path'], post)
+                        continue
                     else:
-                        # Update Database Entry
+                        # Update Database Entry (SICHER)
                         self.update_notion_page(existing_page_id, title, content, metadata)
-                        print(f"✅ Database Entry Updated: {title}")
+                        print(f"✅ Database Entry Updated (SICHER): {title}")
                 else:
-                    # Erstelle neue Page in Database
-                    new_page_id = self.create_notion_page(title, content, metadata, filepath)
-                    print(f"✅ New Database Entry Created: {title}")
+                    # Neue Page erstellen - aber nur wenn Database verfügbar
+                    if self.database_available:
+                        new_page_id = self.create_notion_page(title, content, metadata, filepath)
+                        print(f"✅ New Database Entry Created (SICHER): {title}")
+                    else:
+                        print(f"⚠️ Überspringe {title} - keine Database verfügbar")
+                        # Markiere als synced um endlose Wiederholung zu vermeiden
+                        self.mark_file_synced(file_info['full_path'], post)
+                        continue  # Skip diese Datei
                 
                 # Obsidian-Datei als gesynct markieren
                 self.mark_file_synced(file_info['full_path'], post)
