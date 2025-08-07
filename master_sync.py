@@ -134,6 +134,18 @@ class MasterSyncController:
         
         return success
     
+    def run_change_detection(self):
+        """Change Detection ausführen"""
+        success = self.run_script(
+            'change_detector.py',
+            'Change Detection (Obsidian-Änderungen erkennen)'
+        )
+        
+        if success:
+            self.state['last_change_detection'] = datetime.now().isoformat()
+        
+        return success
+    
     def run_full_sync(self):
         """Kompletten bidirektionalen Sync ausführen"""
         print("🚀 Starte vollständigen bidirektionalen Sync...")
@@ -145,7 +157,13 @@ class MasterSyncController:
         # Kurze Pause zwischen Syncs
         time.sleep(2)
         
-        # 2. Obsidian → Notion (lokale Änderungen pushen)
+        # 2. Change Detection (Obsidian-Änderungen erkennen)
+        change_detection_success = self.run_change_detection()
+        
+        # Kurze Pause
+        time.sleep(1)
+        
+        # 3. Obsidian → Notion (lokale Änderungen pushen)
         obsidian_success = self.sync_obsidian_to_notion()
         
         # Status aktualisieren
@@ -155,11 +173,14 @@ class MasterSyncController:
         self.state['sync_count'] += 1
         self.state['last_full_sync'] = end_time.isoformat()
         
-        if notion_success and obsidian_success:
+        if notion_success and change_detection_success and obsidian_success:
             print(f"🎉 Vollständiger Sync erfolgreich in {duration:.1f}s")
             return True
         else:
             print(f"⚠️ Sync teilweise fehlgeschlagen nach {duration:.1f}s")
+            print(f"   Notion→Obsidian: {'✅' if notion_success else '❌'}")
+            print(f"   Change Detection: {'✅' if change_detection_success else '❌'}")
+            print(f"   Obsidian→Notion: {'✅' if obsidian_success else '❌'}")
             return False
     
     def run_single_sync(self):
@@ -215,6 +236,9 @@ class MasterSyncController:
         
         if self.state['last_full_sync']:
             print(f"   🔄 Letzter Full-Sync: {self.state['last_full_sync']}")
+            
+        if self.state.get('last_change_detection'):
+            print(f"   🔍 Letzte Change Detection: {self.state['last_change_detection']}")
         
         if self.state['last_error']:
             error = self.state['last_error']
@@ -274,6 +298,12 @@ def main():
             controller.save_sync_state()
             sys.exit(0 if success else 1)
         
+        elif command == 'change-detection':
+            # Nur Change Detection
+            success = controller.run_change_detection()
+            controller.save_sync_state()
+            sys.exit(0 if success else 1)
+        
         elif command == 'cleanup':
             # Archive bereinigen
             controller.cleanup_old_files()
@@ -302,6 +332,7 @@ Commands:
     daemon                  Kontinuierlicher Sync alle 15 Min
     status                  Sync-Status anzeigen
     notion-to-obsidian      Nur Notion → Obsidian
+    change-detection        Nur Change Detection (Obsidian-Änderungen erkennen)
     obsidian-to-notion      Nur Obsidian → Notion
     cleanup                 Alte Archive-Dateien bereinigen
 

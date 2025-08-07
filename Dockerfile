@@ -13,10 +13,11 @@ WORKDIR /app
 COPY requirements-sync.txt .
 RUN pip install --no-cache-dir -r requirements-sync.txt
 
-# Nur Sync-Scripts
+# Sync-Scripts
 COPY enhanced_notion_sync.py .
 COPY reverse_sync_notion.py .
 COPY master_sync.py .
+COPY change_detector.py .
 COPY sync_cron.sh .
 COPY sync_start.sh .
 
